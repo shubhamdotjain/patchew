@@ -378,6 +378,7 @@ class MessageManager(models.Manager):
         msg.save()
         self.update_series(msg)        
         emit_event("MessageAdded", message=msg)
+        self.update_series(msg)
         return msg
 
     def add_message_from_mbox(self, mbox, user, project_name=None):
