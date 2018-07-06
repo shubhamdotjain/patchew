@@ -10,122 +10,39 @@
 
 
 from collections import namedtuple
+import os
+import json
 import datetime
 import re
+import uuid
+import logging
 
-from django.core import validators
+from django.conf import settings
 from django.db import models
 from django.contrib.auth.models import User
 from django.urls import reverse
 import jsonfield
-import lzma
-
 from mbox import MboxMessage
 from event import emit_event, declare_event
-from .blobs import save_blob, load_blob
-import mod
 import lzma
 
-class LogEntry(models.Model):
-    data_xz = models.BinaryField()
+def save_blob(data, name=None):
+    if not name:
+        name = str(uuid.uuid4())
+    fn = os.path.join(settings.DATA_DIR, "blob", name + ".xz")
+    lzma.open(fn, 'w').write(data.encode("utf-8"))
+    return name
 
-    @property
-    def data(self):
-        if not hasattr(self, "_data"):
-            self._data = lzma.decompress(self.data_xz).decode("utf-8")
-        return self._data
+def load_blob(name):
+    fn = os.path.join(settings.DATA_DIR, "blob", name + ".xz")
+    return lzma.open(fn, 'r').read().decode("utf-8")
 
-    @data.setter
-    def data(self, value):
-        self._data = value
-        self.data_xz = lzma.compress(value.encode("utf-8"))
-
-class Result(models.Model):
-    PENDING = 'pending'
-    SUCCESS = 'success'
-    FAILURE = 'failure'
-    RUNNING = 'running'
-    VALID_STATUSES = (PENDING, SUCCESS, FAILURE, RUNNING)
-    VALID_STATUSES_RE = '|'.join(VALID_STATUSES)
-
-    name = models.CharField(max_length=256)
-    last_update = models.DateTimeField()
-    status = models.CharField(max_length=7, validators=[
-        validators.RegexValidator(regex=VALID_STATUSES_RE,
-                                  message='status must be one of ' + ', '.join(VALID_STATUSES),
-                                  code='invalid')])
-    log_entry = models.OneToOneField(LogEntry, on_delete=models.CASCADE,
-                                     null=True)
-    data = jsonfield.JSONField()
-
-    class Meta:
-        index_together = [('status', 'name')]
-
-    def is_success(self):
-        return self.status == self.SUCCESS
-
-    def is_failure(self):
-        return self.status == self.FAILURE
-
-    def is_completed(self):
-        return self.is_success() or self.is_failure()
-
-    def is_pending(self):
-        return self.status == self.PENDING
-
-    def is_running(self):
-        return self.status == self.RUNNING
-
-    def save(self):
-        self.last_update = datetime.datetime.utcnow()
-        return super(Result, self).save()
-
-    @property
-    def renderer(self):
-        found = re.match("^[^.]*", self.name)
-        return mod.get_module(found.group(0)) if found else None
-
-    @property
-    def obj(self):
+def load_blob_json(name):
+    try:
+        return json.loads(load_blob(name))
+    except json.decoder.JSONDecodeError as e:
+        logging.error('Failed to load blob %s: %s' %(name, e))
         return None
-
-    def render(self):
-        if self.renderer is None:
-            return None
-        return self.renderer.render_result(self)
-
-    @property
-    def log(self):
-        if self.log_entry is None:
-            return None
-        else:
-            return self.log_entry.data
-
-    @log.setter
-    def log(self, value):
-        entry = self.log_entry
-        if value is None:
-            if entry is not None:
-                self.log_entry = None
-                entry.delete()
-        else:
-            if entry is None:
-                entry = LogEntry()
-            entry.data = value
-            entry.save()
-            if self.log_entry is None:
-                self.log_entry = entry
-
-    def get_log_url(self, request=None):
-        if not self.is_completed() or self.renderer is None:
-            return None
-        log_url = self.renderer.get_result_log_url(self)
-        if log_url is not None and request is not None:
-            log_url = request.build_absolute_uri(log_url)
-        return log_url
-
-    def __str__(self):
-        return '%s (%s)' % (self.name, self.status)
 
 class Project(models.Model):
     name = models.CharField(max_length=1024, db_index=True, unique=True,
@@ -171,23 +88,37 @@ class Project(models.Model):
     def get_property(self, prop, default=None):
         a = ProjectProperty.objects.filter(project=self, name=prop).first()
         if a:
-            return a.value
+            if a.blob:
+                return load_blob_json(a.value)
+            else:
+                return json.loads(a.value)
         else:
             return default
 
     def get_properties(self):
         r = {}
         for m in ProjectProperty.objects.filter(project=self):
-            r[m.name] = m.value
+            if m.blob:
+                r[m.name] = load_blob_json(m.value)
+            else:
+                r[m.name] = json.loads(m.value)
         return r
 
     def _do_set_property(self, prop, value):
         if value == None:
             ProjectProperty.objects.filter(project=self, name=prop).delete()
             return
+        # TODO: drop old blob
+        json_data = json.dumps(value)
+        blob = len(json_data) > 1024
+        if blob:
+            value = save_blob(json_data)
+        else:
+            value = json.dumps(value)
         pp, created = ProjectProperty.objects.get_or_create(project=self,
                                                             name=prop)
         pp.value = value
+        pp.blob = blob
         pp.save()
 
     def set_property(self, prop, value):
@@ -271,20 +202,11 @@ class Project(models.Model):
                 series.save()
         return len(updated_series)
 
-    def create_result(self, **kwargs):
-        return ProjectResult(project=self, **kwargs)
-
-class ProjectResult(Result):
-    project = models.ForeignKey(Project, related_name='results')
-
-    @property
-    def obj(self):
-        return self.project
-
 class ProjectProperty(models.Model):
     project = models.ForeignKey('Project', on_delete=models.CASCADE)
     name = models.CharField(max_length=1024, db_index=True)
-    value = jsonfield.JSONField()
+    value = models.CharField(max_length=1024)
+    blob = models.BooleanField(blank=True, default=False)
 
     class Meta:
         unique_together = ('project', 'name',)
@@ -372,6 +294,7 @@ class MessageManager(models.Manager):
         msg.save_mbox(mbox)
         msg.save()
         emit_event("MessageAdded", message=msg)
+        self.update_series(msg)
         return msg
 
     def add_message_from_mbox(self, mbox, user, project_name=None):
@@ -547,7 +470,10 @@ class Message(models.Model):
             all_props = self.properties.all()
         r = {}
         for m in all_props:
-            r[m.name] = m.value
+            if m.blob:
+                r[m.name] = load_blob_json(m.value)
+            else:
+                r[m.name] = json.loads(m.value)
         self._properties = r
         return r
 
@@ -555,9 +481,17 @@ class Message(models.Model):
         if value == None:
             MessageProperty.objects.filter(message=self, name=prop).delete()
             return
+        json_data = json.dumps(value)
+        blob = len(json_data) > 1024
         mp, created = MessageProperty.objects.get_or_create(message=self,
                                                             name=prop)
+        # TODO: drop old blob
+        if blob:
+            value = save_blob(json_data)
+        else:
+            value = json_data
         mp.value = value
+        mp.blob = blob
         mp.save()
         # Invalidate cache
         self._properties = None
@@ -678,27 +612,19 @@ class Message(models.Model):
         self.save()
         emit_event("SeriesComplete", project=self.project, series=self)
 
-    def create_result(self, **kwargs):
-        return MessageResult(message=self, **kwargs)
-
     def __str__(self):
         return self.subject
 
     class Meta:
         unique_together = ('project', 'message_id',)
 
-class MessageResult(Result):
-    message = models.ForeignKey(Message, related_name='results')
-
-    @property
-    def obj(self):
-        return self.message
-
 class MessageProperty(models.Model):
     message = models.ForeignKey('Message', on_delete=models.CASCADE,
                                 related_name='properties')
     name = models.CharField(max_length=256)
-    value = jsonfield.JSONField()
+    # JSON encoded value
+    value = models.CharField(max_length=1024)
+    blob = models.BooleanField(blank=True, default=False)
 
     def __str__(self):
         if len(self.value) > 30:
@@ -719,3 +645,39 @@ class Module(models.Model):
 
     def __str__(self):
         return self.name
+
+class Result(namedtuple("Result", "name status log log_url obj data renderer")):
+    __slots__ = ()
+    PENDING = 'pending'
+    SUCCESS = 'success'
+    FAILURE = 'failure'
+    RUNNING = 'running'
+    VALID_STATUSES = (PENDING, SUCCESS, FAILURE, RUNNING)
+
+    def __new__(cls, name, status, obj, log=None, log_url=None, data=None, request=None, renderer=None):
+        if log_url is not None and request is not None:
+            log_url = request.build_absolute_uri(log_url)
+        if status not in cls.VALID_STATUSES:
+            raise ValueError("invalid value '%s' for status field" % status)
+        return super(cls, Result).__new__(cls, status=status, log=log, log_url=log_url,
+                                          obj=obj, data=data, name=name, renderer=renderer)
+
+    def is_success(self):
+        return self.status == self.SUCCESS
+
+    def is_failure(self):
+        return self.status == self.FAILURE
+
+    def is_completed(self):
+        return self.is_success() or self.is_failure()
+
+    def is_pending(self):
+        return self.status == self.PENDING
+
+    def is_running(self):
+        return self.status == self.RUNNING
+
+    def render(self):
+        if self.renderer is None:
+            return None
+        return self.renderer.render_result(self)
