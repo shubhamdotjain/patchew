@@ -184,7 +184,7 @@ class DeleteCommand(SubCommand):
         series_list = []
         if len(argv)==0:
             resp = self.rest_api_do("projects")
-            for project in len(resp['result']):
+            for project in resp['result']:
                 url = project['series']
                 series_resp = self.rest_api_do(url)
                 series_list = series_list + series_resp['results']

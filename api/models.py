@@ -375,8 +375,8 @@ class MessageManager(models.Manager):
         msg.patch_num = m.get_num()[0]
         msg.project = project
         msg.save_mbox(mbox)
-        self.update_series(msg)
         msg.save()
+        self.update_series(msg)        
         emit_event("MessageAdded", message=msg)
         return msg
 
