@@ -148,6 +148,12 @@ class ProjectsViewSet(viewsets.ModelViewSet):
     permission_classes = (PatchewPermission,)
     authentication_classes = (CsrfExemptSessionAuthentication, )
 
+    def get_queryset(self):
+        name = self.request.query_params.get('name', None)
+        if name is not None:
+            return Project.objects.filter(name=name).order_by('id')
+        return Project.objects.all().order_by('id')
+
     @action(methods=['post'], detail=True, permission_classes=[ImportPermission])
     def update_project_head(self, request, pk=None):
         """
