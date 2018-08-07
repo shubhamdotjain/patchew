@@ -15,6 +15,7 @@ from tests.patchewtest import PatchewTestCase, main
 import shutil
 import subprocess
 from api.models import Message, Result
+import json
 
 class GitTest(PatchewTestCase):
 
@@ -100,6 +101,52 @@ class GitTest(PatchewTestCase):
         self.assertEqual(resp.data['status'], 'pending')
         self.assertEqual(resp.data['log_url'], None)
         self.assertEqual(resp.data['log'], None)
+
+    def test_auth_importer(self):
+        self.cli_import("0013-foo-patch.mbox.gz")
+        MESSAGE_ID = '20160628014747.20971-1-famz@redhat.com'
+        test = self.create_user(username="test", password="userpass", groups=['importers'])
+        self.api_client.login(username="test", password="userpass")
+        data = {
+                "name": "testing.a",
+                "status": "failure",
+                "data": {"tag": "test_tag", "url": "test_url", "repo": "test_repo", "base": "test_base"},
+                "log": "test",
+                "last_update": '2018-08-07T03:51:13.262213'}
+
+        resp= self.api_client.put('%sseries/%s/results/git/' % (self.PROJECT_BASE, MESSAGE_ID), data=json.dumps(data), content_type='application/json')
+        self.assertEquals(resp.status_code, 200)
+        self.assertEquals(resp.data['log'], "test")
+
+    def test_data_validation(self):
+        self.cli_import("0013-foo-patch.mbox.gz")
+        MESSAGE_ID = '20160628014747.20971-1-famz@redhat.com'
+        test = self.create_user(username="test", password="userpass", groups=['importers'])
+        self.api_client.login(username="test", password="userpass")
+        data = {
+                "name": "testing.a",
+                "status": "failure",
+                "data": "",
+                "log": "test",
+                "last_update": '2018-08-07T03:51:13.262213'}
+
+        resp= self.api_client.put('%sseries/%s/results/git/' % (self.PROJECT_BASE, MESSAGE_ID), data=json.dumps(data), content_type='application/json')
+        self.assertEquals(resp.status_code, 400)
+
+    def test_auth_without_permission(self):
+        self.cli_import("0013-foo-patch.mbox.gz")
+        MESSAGE_ID = '20160628014747.20971-1-famz@redhat.com'
+        test = self.create_user(username="test", password="userpass")
+        self.api_client.login(username="test", password="userpass")
+        data = {
+                "name": "testing.a",
+                "status": "failure",
+                "data": {"tag": "test_tag", "url": "test_url", "repo": "test_repo", "base": "test_base"},
+                "log": "test",
+                "last_update": '2018-08-07T03:51:13.262213'}
+
+        resp= self.api_client.put('%sseries/%s/results/git/' % (self.PROJECT_BASE, MESSAGE_ID), data=json.dumps(data), content_type='application/json')
+        self.assertEquals(resp.status_code, 403)
 
     def test_rest_git_base(self):
         self.cli_import("0013-foo-patch.mbox.gz")

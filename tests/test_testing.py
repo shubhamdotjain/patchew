@@ -15,6 +15,7 @@ import subprocess
 sys.path.append(os.path.dirname(__file__))
 from tests.patchewtest import PatchewTestCase, main
 from api.models import Message, Result
+import json
 
 def create_test(project, name):
     prefix = "testing.tests." + name + "."
@@ -214,6 +215,7 @@ class TesterTest(PatchewTestCase):
 
         self.p1 = self.add_project("QEMU", "qemu-devel@nongnu.org")
         create_test(self.p1, "a")
+        self.PROJECT_BASE = '%sprojects/%d/' % (self.REST_BASE, self.p1.id)
         self.p2 = self.add_project("UMEQ", "qemu-devel@nongnu.org")
         create_test(self.p2, "b")
 
@@ -247,6 +249,51 @@ class TesterTest(PatchewTestCase):
         head = subprocess.check_output(["git", "rev-parse", "HEAD"],
                                        cwd=self.repo).decode()
         p.set_property("git.head", head)
+
+    def test_auth_tester(self):
+        resp = self.api_client.get('%sresults/' % (
+                                       self.PROJECT_BASE))
+        test = self.create_user(username="test", password="userpass", groups=['testers'])
+        self.api_client.login(username="test", password="userpass")
+        data = {
+                "name": "testing.a",
+                "status": "failure",
+                "data": {"head": "test_head", "tester": "test_tester", "is_timeout": False},
+                "log": "test",
+                "last_update": '2018-08-07T03:51:13.262213'}
+
+        resp1= self.api_client.put(resp.data['results'][0]['resource_uri'],data=json.dumps(data), content_type='application/json')
+        self.assertEquals(resp1.status_code, 200)
+        self.assertEquals(resp1.data['log'], "test")
+
+    def test_data_validation(self):
+        resp = self.api_client.get('%sresults/' % (
+                                       self.PROJECT_BASE))
+        test = self.create_user(username="test", password="userpass", groups=['testers'])
+        self.api_client.login(username="test", password="userpass")
+        data = {
+                "name":"testing.a",
+                "status":"failure",
+                "data":"",
+                "log":"test",
+                "last_update": '2018-08-07T03:51:13.262213'}
+        resp1= self.api_client.put(resp.data['results'][0]['resource_uri'],data=json.dumps(data), content_type='application/json')
+        self.assertEquals(resp1.status_code, 400)
+
+    def test_auth_without_permission(self):
+        resp = self.api_client.get('%sresults/' % (
+                                       self.PROJECT_BASE))
+        test = self.create_user(username="test", password="userpass")
+        self.api_client.login(username="test", password="userpass")
+        data = {
+                "name": "testing.a",
+                "status": "failure",
+                "data": {"head": "test_head", "tester": "test_tester", "is_timeout": False},
+                "log": "test",
+                "last_update": '2018-08-07T03:51:13.262213'}
+
+        resp1= self.api_client.put(resp.data['results'][0]['resource_uri'],data=json.dumps(data), content_type='application/json')
+        self.assertEquals(resp1.status_code, 403)
 
     def test_tester(self):
         self.cli_login()

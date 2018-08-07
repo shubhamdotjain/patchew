@@ -26,6 +26,9 @@ import rest_framework
 from mbox import addr_db_to_rest, MboxMessage
 from rest_framework.parsers import JSONParser, BaseParser
 from rest_framework.authentication import SessionAuthentication
+from rest_framework.exceptions import ValidationError
+import re
+import mod
 
 class CsrfExemptSessionAuthentication(SessionAuthentication):
 
@@ -65,8 +68,9 @@ class PatchewPermission(permissions.BasePermission):
 
     def has_generic_permission(self, request, view):
         return (request.method in permissions.SAFE_METHODS) or \
-               self.is_superuser(request) or \
-               self.has_group_permission(request, view)
+                self.is_superuser(request) or \
+                self.has_group_permission(request, view) or \
+                self.has_result_group_permission(request, view) 
 
     def has_permission(self, request, view):
         return self.has_generic_permission(request, view) or \
@@ -78,7 +82,22 @@ class PatchewPermission(permissions.BasePermission):
                (isinstance(obj, Message) and \
                 self.has_message_permission(request, view, obj)) or \
                (isinstance(obj, Project) and \
-                self.has_project_permission(request, view, obj))
+                self.has_project_permission(request, view, obj)) or \
+               (isinstance(obj, Result) and \
+                self.has_result_permission(request, view, obj))
+
+    def has_result_group_permission(self, request, view):
+        name = request.resolver_match.kwargs.get('name')
+        if name:
+            found = re.match("^[^.]*", name)
+            module = mod.get_module(found.group(0)) if found else None
+            for grp in request.user.groups.all():
+                if grp.name in module.allowed_groups:
+                    return True
+        return False
+
+    def has_result_permission(self, request, view, result_obj):
+        return self.has_object_permission(request, view, result_obj.project)
 
 class ImportPermission(PatchewPermission):
     allowed_groups = ('importers',)
@@ -475,6 +494,14 @@ class ResultSerializer(serializers.ModelSerializer):
         request = self.context['request']
         return obj.get_log_url(request)
 
+    def validate(self, data):
+        found = re.match("^[^.]*", self.instance.name)
+        module = mod.get_module(found.group(0)) if found else None
+        is_valid = module.result_data_serializer_class(data=data['data']).is_valid(raise_exception=True)
+        if found is None and not is_valid:
+            raise ValidationError("Invalid")
+        return data
+
 class ResultSerializerFull(ResultSerializer):
     class Meta:
         model = Result
@@ -484,17 +511,29 @@ class ResultSerializerFull(ResultSerializer):
     log = CharField(required=False)
 
 class ResultsViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin,
-                         viewsets.GenericViewSet):
+                     mixins.UpdateModelMixin, viewsets.GenericViewSet):
     lookup_field = 'name'
     lookup_value_regex = '[^/]+'
     filter_backends = (filters.OrderingFilter,)
     ordering_fields = ('name',)
     ordering = ('name',)
+    authentication_classes = (CsrfExemptSessionAuthentication, )
+    permission_classes = (PatchewPermission, )
 
     def get_serializer_class(self, *args, **kwargs):
         if self.lookup_field in self.kwargs:
             return ResultSerializerFull
         return ResultSerializer
+
+    @property
+    def project(self):
+        if hasattr(self, '__project'):
+            return self.__project
+        try:
+            self.__project = Project.objects.get(id=self.kwargs['projects_pk'])
+        except:
+            self.__project = None
+        return self.__project
 
 class ProjectResultsViewSet(ResultsViewSet):
     def get_queryset(self):
